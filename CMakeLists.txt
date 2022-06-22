@@ -6,7 +6,7 @@ project(laser_assembler)
 ##############################################################################
 
 set(THIS_PACKAGE_ROS_DEPS
-tf sensor_msgs message_filters roscpp laser_geometry filters)
+tf sensor_msgs message_filters roscpp laser_geometry filters pcl_conversions pcl_ros)
 
 find_package(catkin REQUIRED COMPONENTS
   ${THIS_PACKAGE_ROS_DEPS}

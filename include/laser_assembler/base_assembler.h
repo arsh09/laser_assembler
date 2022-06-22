@@ -50,6 +50,12 @@
 #include "boost/thread.hpp"
 #include "math.h"
 
+// PCL 
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+
+
 namespace laser_assembler
 {
 
@@ -103,6 +109,7 @@ private:
   ros::ServiceServer assemble_scans_server_;
   ros::ServiceServer build_cloud_server2_;
   ros::ServiceServer assemble_scans_server2_;
+  ros::ServiceServer merge_scans_server2_;
   message_filters::Subscriber<T> scan_sub_;
   message_filters::Connection tf_filter_connection_;
 
@@ -115,6 +122,10 @@ private:
   bool assembleScans(AssembleScans::Request& req, AssembleScans::Response& resp) ;
   bool buildCloud2(AssembleScans2::Request& req, AssembleScans2::Response& resp) ;
   bool assembleScans2(AssembleScans2::Request& req, AssembleScans2::Response& resp) ;
+
+  // use PCL for ICP and downsampling
+  bool mergeScanICP(AssembleScans::Request& req, AssembleScans::Response& resp) ;
+  bool mergeScans2(AssembleScans2::Request& req, AssembleScans2::Response& resp) ;
 
   //! \brief Stores history of scans
   std::deque<sensor_msgs::PointCloud> scan_hist_ ;
@@ -182,6 +193,8 @@ BaseAssembler<T>::BaseAssembler(const std::string& max_size_param_name) : privat
   assemble_scans_server_ = n_.advertiseService("assemble_scans", &BaseAssembler<T>::assembleScans, this);
   build_cloud_server2_    = n_.advertiseService("build_cloud2",    &BaseAssembler<T>::buildCloud2,    this);
   assemble_scans_server2_ = n_.advertiseService("assemble_scans2", &BaseAssembler<T>::assembleScans2, this);
+  merge_scans_server2_ =   n_.advertiseService("merge_scans2",  &BaseAssembler<T>::mergeScans2, this);
+
 
   // ***** Start Listening to Data *****
   // (Well, don't start listening just yet. Keep this as null until we actually start listening, when start() is called)
@@ -267,7 +280,6 @@ bool BaseAssembler<T>::buildCloud(AssembleScans::Request& req, AssembleScans::Re
   ROS_WARN("Service 'build_cloud' is deprecated. Call 'assemble_scans' instead");
   return assembleScans(req, resp);
 }
-
 
 template <class T>
 bool BaseAssembler<T>::assembleScans(AssembleScans::Request& req, AssembleScans::Response& resp)
@@ -355,6 +367,8 @@ bool BaseAssembler<T>::buildCloud2(AssembleScans2::Request& req, AssembleScans2:
   return assembleScans2(req, resp);
 }
 
+
+
 template <class T>
 bool BaseAssembler<T>::assembleScans2(AssembleScans2::Request& req, AssembleScans2::Response& resp)
 {
@@ -370,4 +384,27 @@ bool BaseAssembler<T>::assembleScans2(AssembleScans2::Request& req, AssembleScan
   }
   return ret;
 }
+
+template <class T>
+bool BaseAssembler<T>::mergeScanICP(AssembleScans::Request& req, AssembleScans::Response& resp)
+{
+  return true ;
+}
+
+template <class T>
+bool BaseAssembler<T>::mergeScans2(AssembleScans2::Request& req, AssembleScans2::Response& resp)
+{
+  AssembleScans::Request tmp_req;
+  AssembleScans::Response tmp_res;
+  tmp_req.begin = req.begin;
+  tmp_req.end = req.end;
+  bool ret = mergeScanICP(tmp_req, tmp_res);
+
+  if ( ret )
+  {
+    sensor_msgs::convertPointCloudToPointCloud2(tmp_res.cloud, resp.cloud);
+  }
+  return ret;
+}
+
 }

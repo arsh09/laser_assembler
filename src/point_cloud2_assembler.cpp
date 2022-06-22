@@ -63,7 +63,7 @@ public:
   unsigned int GetPointsInScan(const sensor_msgs::PointCloud2& scan)
   {
     return (scan.width * scan.height);
-  }
+  } 
 
   void ConvertToCloud(const string& fixed_frame_id, const sensor_msgs::PointCloud2& scan_in, sensor_msgs::PointCloud& cloud_out)
   {

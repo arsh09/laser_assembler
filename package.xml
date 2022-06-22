@@ -24,6 +24,9 @@
   <build_depend>filters</build_depend>
   <build_depend>laser_geometry</build_depend>
   <build_depend>pluginlib</build_depend>
+  <build_depend>libpcl-all-dev</build_depend>
+  <build_depend>pcl_conversions</build_depend>
+  <build_depend>pcl_ros</build_depend>
   
   <run_depend>message_runtime</run_depend>
   <run_depend>sensor_msgs</run_depend>
@@ -33,7 +36,10 @@
   <run_depend>filters</run_depend>
   <run_depend>laser_geometry</run_depend>
   <run_depend>pluginlib</run_depend>
-
+  <run_depend>libpcl-all</run_depend>
+  <run_depend>pcl_conversions</run_depend>
+  <run_depend>pcl_ros</run_depend>
+  
   <export>
   </export>
 </package>
