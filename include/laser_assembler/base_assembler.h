@@ -52,12 +52,36 @@
 
 // PCL 
 #include <pcl_conversions/pcl_conversions.h>
+#include <pcl/conversions.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/filters/filter.h>
+#include <pcl/features/normal_3d.h>
+#include <pcl/registration/icp.h>
+#include "pcl/filters/voxel_grid.h" //for downsampling the point cloud
+#include "pcl/kdtree/kdtree_flann.h" //for the kdtree
+#include "pcl/registration/transforms.h" //for the transformation function
+#include <pcl/filters/extract_indices.h>
 
 
 namespace laser_assembler
 {
+
+bool pclSort (pcl::PointXYZINormal i, pcl::PointXYZINormal j)
+{
+  return (i.x < j.x);
+}
+
+bool pclUnique (pcl::PointXYZINormal i, pcl::PointXYZINormal j)
+{
+  double x_diff = fabs(i.x - j.x);
+  double y_diff = fabs(i.y - j.y);
+  double z_diff = fabs(i.z - j.z);
+  if(x_diff < 0.0001 && y_diff < 0.0001 && z_diff < 0.0001 )
+    return true;
+  else
+    return false;
+}
 
 /**
  * \brief Maintains a history of point clouds and generates an aggregate point cloud upon request
@@ -124,7 +148,7 @@ private:
   bool assembleScans2(AssembleScans2::Request& req, AssembleScans2::Response& resp) ;
 
   // use PCL for ICP and downsampling
-  bool mergeScanICP(AssembleScans::Request& req, AssembleScans::Response& resp) ;
+  bool mergeScanICP(AssembleScans2::Request& req, AssembleScans2::Response& resp) ;
   bool mergeScans2(AssembleScans2::Request& req, AssembleScans2::Response& resp) ;
 
   //! \brief Stores history of scans
@@ -142,6 +166,13 @@ private:
 
   //! \brief Specify how much to downsample the data. A value of 1 preserves all the data. 3 would keep 1/3 of the data.
   unsigned int downsample_factor_ ;
+
+
+  // pointcloud merger 
+  pcl::KdTreeFLANN<pcl::PointXYZINormal> kdtree_;  // for kdtree
+  pcl::PointCloud<pcl::PointXYZINormal> pointcloud2_current_, pointcloud2_merged_, pointcloud2_transformed_;
+  pcl::PointCloud<pcl::PointXYZINormal> convertFromMsgToPointCloud(const sensor_msgs::PointCloud& pointcloud_msg);
+  bool getOverlapTransformation(void);
 
 } ;
 
@@ -368,7 +399,6 @@ bool BaseAssembler<T>::buildCloud2(AssembleScans2::Request& req, AssembleScans2:
 }
 
 
-
 template <class T>
 bool BaseAssembler<T>::assembleScans2(AssembleScans2::Request& req, AssembleScans2::Response& resp)
 {
@@ -382,28 +412,173 @@ bool BaseAssembler<T>::assembleScans2(AssembleScans2::Request& req, AssembleScan
   {
     sensor_msgs::convertPointCloudToPointCloud2(tmp_res.cloud, resp.cloud);
   }
+  
+
   return ret;
 }
 
+
+
 template <class T>
-bool BaseAssembler<T>::mergeScanICP(AssembleScans::Request& req, AssembleScans::Response& resp)
+bool BaseAssembler<T>::getOverlapTransformation(void)
 {
+  //searching for overlapped points in the point cloud
+  // Allocate enough space to hold the results
+  int max_nn_overlap_ = 10;
+  double radius_overlap_ = 0.05;
+  std::vector<int> nn_indices (max_nn_overlap_);
+  std::vector<float> nn_dists (max_nn_overlap_);
+
+  pcl::PointIndices::Ptr inliers(new pcl::PointIndices());
+  pcl::ExtractIndices<pcl::PointXYZ> extract;
+
+  std::vector<pcl:: PointXYZINormal, Eigen::aligned_allocator<pcl:: PointXYZINormal> >::iterator it;
+  for(size_t idx = 0 ; idx < pointcloud2_current_.points.size(); idx++ )
+  {
+    kdtree_.radiusSearch(pointcloud2_current_, idx, radius_overlap_, nn_indices, nn_dists, max_nn_overlap_);
+    if(nn_indices.size() > 0 )
+    {
+      ROS_ERROR_STREAM("Common points are: " << nn_indices.size() ) ;
+      inliers->indices.push_back(idx);
+    }
+  }
+
+  // const pcl::PointCloud<pcl::PointXYZINormal> *out = &pointcloud2_current_;
+  // pcl::PointCloud<pcl::PointXYZ> filtered ;
+  const pcl::PointCloud<pcl::PointXYZ>::ConstPtr filteredptr = &pointcloud2_current_;
+
+  extract.setInputCloud(filteredptr);
+  extract.setIndices(inliers);
+  extract.setNegative(true);
+  // extract.filter(pointcloud2_current_);
+
+
+  return true;
+}
+
+template <class T>
+pcl::PointCloud<pcl::PointXYZINormal> BaseAssembler<T>::convertFromMsgToPointCloud(const sensor_msgs::PointCloud& pointcloud_msg)
+{
+  // Declaring some variables required in this function
+  sensor_msgs::PointCloud2 pointcloud2_msg;
+  pcl::PointCloud<pcl::PointXYZI> pointcloud_pcl_step01, pointcloud_pcl_step02;
+  pcl::PointCloud<pcl::PointXYZINormal> pointcloud_pcl_normals;
+  pcl::PointCloud<pcl::PointXYZINormal> pointcloud_pcl_normals_without_nan;
+  std::vector<int> indices_nan;
+  pcl::NormalEstimation<pcl::PointXYZI, pcl::Normal> n;
+  // pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr tree_ptr_;
+  // tree_ptr_ = boost::make_shared<pcl::KdTreeFLANN<pcl::PointXYZI> > ();
+  pcl::search::KdTree<pcl::PointXYZI>::Ptr tree_ptr_(new pcl::search::KdTree<pcl::PointXYZI>);
+  std::vector<int> indices;
+
+  // Converting from PointCloud msg format to PointCloud2 msg format
+  sensor_msgs::convertPointCloudToPointCloud2(pointcloud_msg, pointcloud2_msg);
+
+  //This is done because there is a bug in PCL.
+  for(u_int i = 0 ; i < pointcloud2_msg.fields.size(); i++)
+  {
+    if(pointcloud2_msg.fields[i].name == "intensities")
+    {
+      pointcloud2_msg.fields[i].name = "intensity";
+    }
+  } 
+
+  // Converting from PointCloud2 msg format to pcl pointcloud format
+  pcl::fromROSMsg(pointcloud2_msg, pointcloud_pcl_step01);
+  pointcloud_pcl_step02 = pointcloud_pcl_step01;
+  tree_ptr_->setInputCloud (boost::make_shared<pcl::PointCloud<pcl::PointXYZI> > (pointcloud_pcl_step02));
+  indices.resize (pointcloud_pcl_step02.points.size ());
+  for (size_t i = 0; i < indices.size (); ++i)
+  {
+    indices[i] = i;
+  }
+
+  // STEP 03: Here we perform Normal Estimation on the input cloud
+
+  // Object
+  pcl::PointCloud<pcl::Normal> normals;
+  // set parameters
+
+  n.setInputCloud (boost::make_shared <const pcl::PointCloud<pcl::PointXYZI> > (pointcloud_pcl_step02));
+  n.setIndices (boost::make_shared <std::vector<int> > (indices));
+  n.setSearchMethod (tree_ptr_);
+  n.setKSearch (10);
+
+  // estimate
+  n.compute (normals);
+
+  // STEP 04: Here we copy data from the normals and the input cloud into the pcl::PointXYZINormal cloud
+  pointcloud_pcl_normals.points.resize(pointcloud_pcl_step02.points.size());
+
+  for(u_int i = 0 ; i < pointcloud_pcl_step02.points.size(); i++)
+  {
+    pointcloud_pcl_normals.points[i].x = pointcloud_pcl_step02.points[i].x;
+    pointcloud_pcl_normals.points[i].y = pointcloud_pcl_step02.points[i].y;
+    pointcloud_pcl_normals.points[i].z = pointcloud_pcl_step02.points[i].z;
+    //pointcloud_pcl_normals.points[i].rgb = pointcloud_pcl_step02.points[i].rgb;
+    pointcloud_pcl_normals.points[i].intensity = pointcloud_pcl_step02.points[i].intensity;
+    pointcloud_pcl_normals.points[i].normal[0] = normals.points[i].normal[0];
+    pointcloud_pcl_normals.points[i].normal[1] = normals.points[i].normal[1];
+    pointcloud_pcl_normals.points[i].normal[2] = normals.points[i].normal[2];
+    pointcloud_pcl_normals.points[i].curvature = normals.points[i].curvature;
+    //pointcloud_pcl_normals.points[i].scan_index = scan_index_;
+  }
+
+  pointcloud_pcl_normals.header.frame_id = pointcloud_pcl_normals.header.frame_id;
+  pointcloud_pcl_normals.header.stamp = pointcloud_pcl_normals.header.stamp;
+  pointcloud_pcl_normals.width    = pointcloud_pcl_normals.points.size ();
+  pointcloud_pcl_normals.height   = 1;
+  pointcloud_pcl_normals.is_dense = false;
+  
+
+  pcl::removeNaNFromPointCloud( pointcloud_pcl_normals, pointcloud_pcl_normals_without_nan, indices_nan );
+
+  ROS_ERROR_STREAM("Removed NANs. total  " << pointcloud_pcl_normals.points.size() << " Now: " << pointcloud_pcl_normals_without_nan.points.size() );
+  return (pointcloud_pcl_normals_without_nan);
+}
+
+template <class T>
+bool BaseAssembler<T>::mergeScanICP(AssembleScans2::Request& req, AssembleScans2::Response& resp)
+{
+
+  ROS_ERROR_STREAM("Length of scan history is " << scan_hist_.size());
+  if ( scan_hist_.size() >= 2 )
+  {
+    ROS_ERROR("Locking the mutex");
+    scan_hist_mutex_.lock();
+
+
+    pointcloud2_current_ = convertFromMsgToPointCloud(scan_hist_[0]);    
+    kdtree_.setInputCloud(boost::make_shared< pcl::PointCloud < pcl::PointXYZINormal> > (pointcloud2_current_));
+
+    // clound 1 becomes merged
+    pointcloud2_merged_ = pointcloud2_current_;
+    // cloud 2 becomes current
+    pointcloud2_current_ = convertFromMsgToPointCloud(scan_hist_[ scan_hist_.size() - 1 ]);    
+
+    // ROS_ERROR_STREAM("Before: Merge: " << pointcloud2_merged_.points.size() << " Current: " << pointcloud2_current_.points.size());
+    // remove common points from current which are in merged.
+    bool ret = getOverlapTransformation();
+    // ROS_ERROR_STREAM("After: Merge: " << pointcloud2_merged_.points.size() << " Current: " << pointcloud2_current_.points.size());
+
+    // pointcloud2_merged_ += pointcloud2_current_;
+    // ROS_ERROR_STREAM("After Merge: Merge: " << pointcloud2_merged_.points.size() << " Current: " << pointcloud2_current_.points.size());
+
+    scan_hist_mutex_.unlock();
+    
+  } 
+
+  resp.cloud.fields.resize(0);
+  resp.cloud.data.resize(0);
   return true ;
+
 }
 
 template <class T>
 bool BaseAssembler<T>::mergeScans2(AssembleScans2::Request& req, AssembleScans2::Response& resp)
 {
-  AssembleScans::Request tmp_req;
-  AssembleScans::Response tmp_res;
-  tmp_req.begin = req.begin;
-  tmp_req.end = req.end;
-  bool ret = mergeScanICP(tmp_req, tmp_res);
-
-  if ( ret )
-  {
-    sensor_msgs::convertPointCloudToPointCloud2(tmp_res.cloud, resp.cloud);
-  }
+  ROS_ERROR("Merging pointclouds2 using ICP");
+  bool ret = mergeScanICP(req, resp);
   return ret;
 }
 
