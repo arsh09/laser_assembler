@@ -62,7 +62,8 @@
 #include "pcl/kdtree/kdtree_flann.h" //for the kdtree
 #include "pcl/registration/transforms.h" //for the transformation function
 #include <pcl/filters/extract_indices.h>
-
+#include <pcl/surface/gp3.h>
+#include <pcl/io/vtk_io.h>
 
 namespace laser_assembler
 {
@@ -173,7 +174,7 @@ private:
   pcl::PointCloud<pcl::PointXYZRGB> pointcloud2_current_, pointcloud2_merged_, pointcloud2_transformed_;
   pcl::PointCloud<pcl::PointXYZRGB> convertFromMsgToPointCloud(const sensor_msgs::PointCloud& pointcloud_msg);
   bool getOverlapTransformation(void);
-
+  void convertToMesh(void);
 } ;
 
 template <class T>
@@ -315,7 +316,6 @@ bool BaseAssembler<T>::buildCloud(AssembleScans::Request& req, AssembleScans::Re
 template <class T>
 bool BaseAssembler<T>::assembleScans(AssembleScans::Request& req, AssembleScans::Response& resp)
 {
-  //printf("Starting Service Request\n") ;
 
   scan_hist_mutex_.lock() ;
   // Determine where in our history we actually are
@@ -387,6 +387,10 @@ bool BaseAssembler<T>::assembleScans(AssembleScans::Request& req, AssembleScans:
   }
   scan_hist_mutex_.unlock() ;
 
+  ROS_ERROR_STREAM("Start and end indics are: " << start_index <<  "  " << past_end_index );
+  resp.start_index.data = start_index;
+  resp.end_index.data =  past_end_index;
+
   ROS_DEBUG("Point Cloud Results: Aggregated from index %u->%u. BufferSize: %lu. Points in cloud: %u", start_index, past_end_index, scan_hist_.size(), (int)resp.cloud.points.size ()) ;
   return true ;
 }
@@ -408,16 +412,68 @@ bool BaseAssembler<T>::assembleScans2(AssembleScans2::Request& req, AssembleScan
   tmp_req.end = req.end;
   bool ret = assembleScans(tmp_req, tmp_res);
 
+  resp.start_index = tmp_res.start_index;
+  resp.end_index =  tmp_res.end_index;
+
   if ( ret )
   {
     sensor_msgs::convertPointCloudToPointCloud2(tmp_res.cloud, resp.cloud);
   }
-  
 
   return ret;
 }
 
+template<class T>
+void BaseAssembler<T>::convertToMesh()
+{
+  // Normal estimation*
+  pcl::NormalEstimation<pcl::PointXYZRGB, pcl::Normal> n;
+  pcl::PointCloud<pcl::Normal>::Ptr normals (new pcl::PointCloud<pcl::Normal>);
+  pcl::search::KdTree<pcl::PointXYZRGB>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZRGB>);
 
+  pcl::PointCloud<pcl::PointXYZRGB>::ConstPtr pointcloud2_merged_const_ptr(&pointcloud2_merged_);
+  tree->setInputCloud (pointcloud2_merged_const_ptr);
+  n.setSearchMethod (tree);
+  n.setKSearch (5);
+  n.compute (*normals);
+
+  //* normals should not contain the point normals + surface curvatures
+  // // Concatenate the XYZRGB and normal fields*
+  pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr cloud_with_normals (new pcl::PointCloud<pcl::PointXYZRGBNormal>);
+  pcl::concatenateFields (pointcloud2_merged_, *normals, *cloud_with_normals);
+
+
+  // // Create search tree*
+  pcl::search::KdTree<pcl::PointXYZRGBNormal>::Ptr tree2 (new pcl::search::KdTree<pcl::PointXYZRGBNormal>);
+  tree2->setInputCloud (cloud_with_normals);
+
+  // // Initialize objects
+  pcl::GreedyProjectionTriangulation<pcl::PointXYZRGBNormal> gp3;
+  pcl::PolygonMesh triangles;
+
+  // // Set the maximum distance between connected points (maximum edge length)
+  gp3.setSearchRadius (0.025);
+
+  // // Set typical values for the parameters
+  gp3.setMu (2.5);
+  gp3.setMaximumNearestNeighbors (100);
+  gp3.setMaximumSurfaceAngle(M_PI/4); // 45 degrees
+  gp3.setMinimumAngle(M_PI/18); // 10 degrees
+  gp3.setMaximumAngle(2*M_PI/3); // 120 degrees
+  gp3.setNormalConsistency(false);
+
+  // // Get result
+  gp3.setInputCloud (cloud_with_normals);
+  gp3.setSearchMethod (tree2);
+  gp3.reconstruct (triangles);
+
+  // // Additional vertex information
+  std::vector<int> parts = gp3.getPartIDs();
+  std::vector<int> states = gp3.getPointStates();
+
+  pcl::io::saveVTKFile ("/tmp/mesh.vtk", triangles);
+
+}
 
 template <class T>
 bool BaseAssembler<T>::getOverlapTransformation(void)
@@ -509,32 +565,27 @@ pcl::PointCloud<pcl::PointXYZRGB> BaseAssembler<T>::convertFromMsgToPointCloud(c
   return (pointcloud_pcl_step02);
 }
 
-
 template <class T>
 bool BaseAssembler<T>::mergeScanICP(AssembleScans2::Request& req, AssembleScans2::Response& resp)
 {
-  
-  if ( scan_hist_.size() > 0 )
-  {
-    pointcloud2_merged_.clear();
-    scan_hist_mutex_.lock();
-    for ( size_t i = 0; i < scan_hist_.size() ; i++ )
-    {
-      pointcloud2_merged_ += convertFromMsgToPointCloud(scan_hist_[i]);   
-    }
-    
-    // Converting from PointCloud2 msg format to pcl pointcloud format
-    pcl::toROSMsg(pointcloud2_merged_, resp.cloud );
 
-    ROS_INFO_STREAM("Total data points: " << resp.cloud.data.size() );
-    scan_hist_mutex_.unlock();
-  } 
+  AssembleScans::Request tmp_req;
+  AssembleScans::Response tmp_res;
+  tmp_req.begin = req.begin;
+  tmp_req.end = req.end;
+  bool ret = assembleScans(tmp_req, tmp_res);
+
+  if ( ret && tmp_res.cloud.points.size() > 0)
+  {
+    pointcloud2_merged_ = convertFromMsgToPointCloud(tmp_res.cloud); 
+    pcl::toROSMsg(pointcloud2_merged_, resp.cloud );
+  }
   else 
   {
     resp.cloud.fields.resize(0);
     resp.cloud.data.resize(0);
   }
-  
+
   resp.cloud.header.frame_id = fixed_frame_.c_str();
   resp.cloud.header.stamp = ros::Time::now();
   

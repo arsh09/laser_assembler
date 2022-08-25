@@ -7,3 +7,5 @@ time end
 # This cloud is in the frame specified by the ~fixed_frame node parameter. 
 # cloud is empty if no scans are received in the requested interval.
 sensor_msgs/PointCloud2 cloud
+std_msgs/UInt32 start_index
+std_msgs/UInt32 end_index
